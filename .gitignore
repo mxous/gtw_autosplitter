@@ -1,0 +1,4 @@
+/target
+bridge/bin/
+bridge/obj/
+*.wasm

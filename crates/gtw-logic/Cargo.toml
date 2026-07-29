@@ -1,0 +1,6 @@
+[package]
+name = "gtw-logic"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
