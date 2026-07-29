@@ -15,6 +15,7 @@ namespace GTWSplitterBridge
         private bool _lastPaused = true;
         private bool _lastEnded;
         private bool _loggedCheckpointNames;
+        private bool _loggedReadError;
 
         private void Awake()
         {
@@ -37,9 +38,6 @@ namespace GTWSplitterBridge
                     }
                     return;
                 }
-
-                GtwSplitterState.Attached = true;
-                Logger.LogInfo("Attached to GTWProgressProvider.");
             }
 
             if (_gameState == null)
@@ -47,18 +45,41 @@ namespace GTWSplitterBridge
                 _gameState = Object.FindAnyObjectByType<GTWGameState>();
             }
 
-            int progress = _progress.GetCurrentGameProgressLevel();
-            int max = _progress.GetMaxGameProgressLevel();
+            try
+            {
+                int progress = _progress.GetCurrentGameProgressLevel();
+                int max = _progress.GetMaxGameProgressLevel();
 
-            GtwSplitterState.ProgressLevel = progress;
-            GtwSplitterState.MaxProgressLevel = max;
-            GtwSplitterState.GamePaused = _progress.GamePaused;
-            GtwSplitterState.GameEnded = _progress.GameEnded;
-            GtwSplitterState.TotalIgt = _progress.GetTotalGameSecondsElapsedInPlaythrough();
-            GtwSplitterState.Mode = _gameState != null ? _gameState.SaveSlot : -1;
+                GtwSplitterState.ProgressLevel = progress;
+                GtwSplitterState.MaxProgressLevel = max;
+                GtwSplitterState.GamePaused = _progress.GamePaused;
+                GtwSplitterState.GameEnded = _progress.GameEnded;
+                GtwSplitterState.TotalIgt = _progress.GetTotalGameSecondsElapsedInPlaythrough();
+                GtwSplitterState.Mode = _gameState != null ? _gameState.SaveSlot : -1;
 
-            LogCheckpointNamesOnce(max);
-            LogTransitions(progress);
+                LogCheckpointNamesOnce(max);
+                LogTransitions(progress);
+
+                if (!GtwSplitterState.Attached)
+                {
+                    GtwSplitterState.Attached = true;
+                    Logger.LogInfo("Attached to GTWProgressProvider.");
+                }
+
+                _loggedReadError = false;
+            }
+            catch (System.Exception e)
+            {
+                GtwSplitterState.Attached = false;
+                _loggedCheckpointNames = false;
+
+                if (!_loggedReadError)
+                {
+                    _loggedReadError = true;
+                    Logger.LogWarning("Read from GTWProgressProvider failed: "
+                        + e.GetType().Name + ": " + e.Message);
+                }
+            }
         }
 
         /// <summary>
