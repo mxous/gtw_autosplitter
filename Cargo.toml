@@ -3,7 +3,7 @@ resolver = "2"
 # Only the crates that exist at this commit. Task 3 appends
 # "crates/gtw-autosplitter" when it creates that crate, so that every commit
 # resolves on a fresh checkout. Do NOT list a member that is not in the tree.
-members = ["crates/gtw-logic"]
+members = ["crates/gtw-logic", "crates/gtw-autosplitter"]
 
 [workspace.package]
 edition = "2021"
