@@ -54,6 +54,10 @@ impl Splitter {
         // began. IGT is compared with a tolerance because it is a float
         // accumulated from Time.deltaTime. Progress can decrease during
         // backtracking within the same run (e.g., loading a checkpoint).
+        // Decision of 2026-07-29 by the repo owner: reset keys off IGT alone.
+        // An earlier draft also reset when progress decreased, which
+        // contradicted `backtracking_does_not_split_or_reset`. Do not
+        // reintroduce a progress-based reset without changing that test.
         let igt_went_back = s.total_igt < prev.total_igt - 0.05;
         if igt_went_back {
             actions.reset = true;
