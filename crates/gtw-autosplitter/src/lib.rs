@@ -361,13 +361,14 @@ async fn on_attach(process: &Process) {
                     timer::start();
                     timer::pause_game_time();
                 }
+                
+                if matches!(timer::state(), TimerState::Running | TimerState::Paused) {
+                    timer::set_game_time(Duration::seconds_f64(raw.total_igt as f64));
+                }
+
                 if actions.split {
                     asr::print_message("split");
                     timer::split();
-                }
-
-                if matches!(timer::state(), TimerState::Running | TimerState::Paused) {
-                    timer::set_game_time(Duration::seconds_f64(raw.total_igt as f64));
                 }
             }
         } else {
