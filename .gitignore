@@ -1,4 +1,4 @@
 /target
-bridge/bin/
-bridge/obj/
+tools/**/bin/
+tools/**/obj/
 *.wasm
