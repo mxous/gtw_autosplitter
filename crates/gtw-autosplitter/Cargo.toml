@@ -1,7 +1,11 @@
 [package]
 name = "gtw-autosplitter"
+description = "LiveSplit One auto splitter for Get To Work"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
