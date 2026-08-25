@@ -30,6 +30,10 @@ cargo test -p gtw-logic <test_name>        # single test
 cargo build -p gtw-autosplitter --release --target wasm32-unknown-unknown
 ```
 
+The suite is the `#[cfg(test)] mod tests` at the bottom of `crates/gtw-logic/src/lib.rs`;
+there is no `tests/` directory and nothing else in the workspace is tested. Bare `cargo test`
+also works (the wasm crate builds for the host too) but adds nothing.
+
 Output wasm: `target/wasm32-unknown-unknown/release/gtw_autosplitter.wasm`. The release profile
 is size-tuned (`opt-level="z"`, `lto`, `panic="abort"`); `wasm32-unknown-unknown` is pinned in
 `rust-toolchain.toml`.
@@ -72,19 +76,42 @@ Assembly-CSharp image." → "Bound GTWProgressProvider." on entering a run.
   Owner ruling 2026-07-29; backtracking within a run is legal. See the comment in
   `crates/gtw-logic/src/lib.rs` and `backtracking_does_not_split_or_reset`.
 - First tick never acts (no transition can be inferred from one observation).
-- Splits fire on the rising edge of the high-water mark only, and only after `started`.
+- Splits are decided by **index alignment, not by edges**: `Splitter::update` takes the timer's
+  `current_split_index()` and drives it towards `target_split_index(snapshot)`, which is the
+  checkpoint index (reaching cp N ends segment N-1) and `max_progress_level` once `GameEnded`.
+  Advancing more than one segment emits `skips` then one `split` — the untriggered checkpoints
+  are *skipped* so they record no bogus zero-length segment and the elapsed span lands on the
+  segment that really ended. This is what makes an out-of-bounds checkpoint skip, and a reattach
+  that missed checkpoints, self-correcting rather than permanently one segment behind.
+- The target only ever moves the index **forwards**; a lower target (backtracking, or a manual
+  split ahead of the game) is never undone.
+- **A start edge that belongs to a fresh playthrough also resets** (`is_fresh_run`: IGT < 1s and
+  progress <= 0). Closing the game mid-run drops all splitter state while the timer keeps the
+  dead attempt, and no IGT reading survives to notice the new run — without this, the new run
+  silently continues the old attempt. A *resumed* save re-enters `PLAYER_FIRST_INPUT` carrying
+  minutes of IGT, and must not reset; that is what the IGT test distinguishes.
+- A run already underway with no start edge to observe (splitter restarted, attempt did not) is
+  **adopted**, but only when the timer index is not ahead of the game — otherwise a stale attempt
+  from a previous run would be adopted instead of reset.
+- The timer runs on **game time, not RTA**: `timer::pause_game_time()` is called once on attach
+  and again right after `timer::start()`, and every tick where the timer is Running or Paused
+  pushes `total_igt` in with `timer::set_game_time` — so the displayed time is the game's own
+  load- and pause-removed clock. Game time is set *before* `timer::split()` on the same tick, so
+  the segment time recorded is the IGT at the checkpoint. Keep that ordering.
 - `Splitter` intentionally has no `Default` — it would disagree with `new()` about
   `highest_progress`.
 
 ## Known open issues
 
-Both are recorded in `.superpowers/.../progress.md` and were carried forward rather than fixed:
+Recorded in `.superpowers/.../progress.md`. The reattach and stale-attempt issues were fixed on
+2026-08-24 by the index-alignment rewrite above; what remains:
 
-1. **Mid-run reattach loses splits.** If readiness flips false→true mid-run and progress advanced
-   by more than one checkpoint during the gap, one split fires instead of N. Fix is catch-up
-   splitting in `gtw-logic`, bounded by `max_progress_level`.
-2. **Phantom first split (timing-dependent).** Checkpoint 0 landing before `PLAYER_FIRST_INPUT`
-   is observed, not guaranteed. Cheap hardening: suppress the split when `highest_progress < 0`.
+1. **Phantom first split (timing-dependent).** Checkpoint 0 landing before `PLAYER_FIRST_INPUT`
+   is observed, not guaranteed. Largely moot now — a start edge sets the index to 0 and the
+   target is clamped at 0 for cp <= 0 — but it has never been reproduced either way.
+2. **Attaching to a fresh run after its first input** (IGT still under 1s, no start edge left to
+   see) neither adopts nor resets, and the run goes unsplit until IGT passes the `is_fresh_run`
+   threshold. Narrow: it needs the splitter to start up inside the first second of a run.
 
 ## Mono binding
 

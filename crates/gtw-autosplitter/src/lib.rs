@@ -350,7 +350,14 @@ async fn on_attach(process: &Process) {
                     currently_loading: false,
                 };
 
-                let actions = splitter.update(snapshot);
+                // The timer's own split index is an input to the decision:
+                // it is what tells the splitter how far behind the run the
+                // timer is, whether because a checkpoint was skipped out of
+                // bounds or because the splitter restarted with the game.
+                let split_index =
+                    timer::current_split_index().and_then(|index| u32::try_from(index).ok());
+
+                let actions = splitter.update(snapshot, split_index);
 
                 if actions.reset {
                     asr::print_message("reset");
@@ -361,11 +368,21 @@ async fn on_attach(process: &Process) {
                     timer::start();
                     timer::pause_game_time();
                 }
-                
+
+                // Before any split, so that each segment is recorded at the
+                // IGT of the checkpoint that ended it.
                 if matches!(timer::state(), TimerState::Running | TimerState::Paused) {
                     timer::set_game_time(Duration::seconds_f64(raw.total_igt as f64));
                 }
 
+                // Segments whose checkpoint the run never triggered are
+                // skipped rather than split, so they record no bogus
+                // zero-length time and the elapsed span lands on the segment
+                // that actually ended.
+                for _ in 0..actions.skips {
+                    asr::print_message("skip split");
+                    timer::skip_split();
+                }
                 if actions.split {
                     asr::print_message("split");
                     timer::split();
