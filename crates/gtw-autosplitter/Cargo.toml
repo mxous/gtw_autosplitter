@@ -1,0 +1,19 @@
+[package]
+name = "gtw-autosplitter"
+description = "LiveSplit One auto splitter for Get To Work"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+asr = { git = "https://github.com/LiveSplit/asr", features = ["derive", "unity", "alloc"] }
+gtw-logic = { path = "../gtw-logic" }
+# Required by the "alloc" feature above: asr is no_std and does not ship a
+# global allocator itself. This mirrors LiveSplit/auto-splitter-template's
+# own Cargo.toml.liquid, which pulls in dlmalloc for exactly this reason.
+dlmalloc = { version = "0.2.4", features = ["global"] }

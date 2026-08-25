@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/gtw-logic", "crates/gtw-autosplitter"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "0BSD"
+repository = "https://github.com/mxous/gtw_autosplitter"
+
+[profile.release]
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true
+codegen-units = 1

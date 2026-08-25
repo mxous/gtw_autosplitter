@@ -1,0 +1,10 @@
+[package]
+name = "gtw-logic"
+description = "Split-decision state machine for the Get To Work auto splitter"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
