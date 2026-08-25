@@ -11,15 +11,9 @@ pub struct Snapshot {
     pub currently_loading: bool,
 }
 
-/// Timer operations to perform for a tick. More than one can be set, and they
-/// are to be applied in field order: reset, start, then `skips` calls to
-/// `skip_split` followed by, if `split`, one real split.
-///
-/// Splitting is expressed as "skip n, then split" rather than "split n times"
-/// because a run can legitimately pass a checkpoint without triggering it (an
-/// out-of-bounds skip). The segments whose checkpoints were never triggered are
-/// skipped, so the timer records no bogus zero-length segment for them and the
-/// whole elapsed span lands on the segment that did end.
+/// Timer operations for a tick, applied in field order: reset, start, then
+/// `skips` calls to `skip_split` followed by, if `split`, one real split.
+/// Segments whose checkpoint the run never triggered are skipped, not split.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Actions {
     pub reset: bool,
@@ -28,18 +22,14 @@ pub struct Actions {
     pub split: bool,
 }
 
-/// IGT is a float accumulated from `Time.deltaTime`, so "went backwards" needs
-/// slack to survive the last bits of the sum wobbling.
+/// Slack for comparing IGT, which is a float sum of `Time.deltaTime`.
 const IGT_TOLERANCE: f32 = 0.05;
 
-/// Below this IGT, a run that is only now taking its first input has to be a
-/// fresh playthrough rather than a save resumed from the main menu: the game's
-/// IGT is pause- and load-removed and persists across a save/load, so a resumed
-/// run re-enters `PLAYER_FIRST_INPUT` carrying minutes on the clock.
+/// IGT below which a run taking its first input is a fresh playthrough rather
+/// than a resumed save, whose IGT persists across the load.
 const FRESH_RUN_IGT: f32 = 1.0;
 
-// Deliberately not Default: a derived Default would disagree with new()
-// about the initial value of highest_progress.
+// Deliberately not Default: it would disagree with new() about highest_progress.
 #[derive(Debug)]
 pub struct Splitter {
     prev: Option<Snapshot>,
@@ -56,41 +46,28 @@ impl Splitter {
         self.started
     }
 
-    /// High-water mark of the checkpoint index. Bookkeeping only: splits are
-    /// driven by [`target_split_index`] against the timer's own index, not by
-    /// this. See `update`.
+    /// High-water mark of the checkpoint index. Bookkeeping only; splits are
+    /// driven by [`target_split_index`] against the timer's own index.
     pub fn highest_progress(&self) -> i32 {
         self.highest_progress
     }
 
-    /// `timer_split_index` is the timer's current split index, or `None` when
-    /// no attempt is in progress.
-    ///
-    /// Splits are decided by comparing that index against the index the game
-    /// says the run is at, rather than by reacting to each progress increase.
-    /// A single rising edge can be worth more than one split — an out-of-bounds
-    /// route can skip a checkpoint entirely, and a reattach can miss a stretch
-    /// of them — and reacting per edge silently puts the timer a segment behind
-    /// for the rest of the run. Comparing against the real index instead makes
-    /// every tick self-correcting.
+    /// Decides a tick from the game state and `timer_split_index`, the timer's
+    /// current split index or `None` when no attempt is in progress. Splits
+    /// come from aligning that index to [`target_split_index`], not from edges.
     pub fn update(&mut self, s: Snapshot, timer_split_index: Option<u32>) -> Actions {
         let mut actions = Actions::default();
 
-        // No transitions can be judged from a single observation.
+        // No transition can be judged from a single observation.
         let Some(prev) = self.prev.replace(s) else {
             self.highest_progress = s.progress_level;
             return actions;
         };
 
-        // IGT is monotonic within a run, so going backwards means a new run
-        // began. Progress can decrease during backtracking within the same run
-        // (e.g., loading a checkpoint). Decision of 2026-07-29 by the repo
-        // owner: reset keys off IGT alone. An earlier draft also reset when
-        // progress decreased, which contradicted
-        // `backtracking_does_not_split_or_reset`. Do not reintroduce a
-        // progress-based reset without changing that test.
-        let igt_went_back = s.total_igt < prev.total_igt - IGT_TOLERANCE;
-        if igt_went_back {
+        // IGT is monotonic within a run, so going backwards means a new run.
+        // Reset keys off IGT alone: progress may drop while backtracking. See
+        // `backtracking_does_not_split_or_reset`.
+        if s.total_igt < prev.total_igt - IGT_TOLERANCE {
             actions.reset = true;
             self.started = false;
             self.highest_progress = s.progress_level;
@@ -102,31 +79,23 @@ impl Splitter {
         }
 
         if !self.started {
-            // GTWProgressProvider.Awake sets GamePaused = true; the
-            // PLAYER_FIRST_INPUT handler clears it.
+            // Awake sets GamePaused; the PLAYER_FIRST_INPUT handler clears it.
             if prev.game_paused && !s.game_paused {
                 self.started = true;
                 actions.start = true;
-                // Closing the game mid-run drops every bit of splitter state
-                // while the timer keeps the dead attempt, and no IGT reading
-                // survives to notice it going backwards. So a first input that
-                // belongs to a fresh playthrough has to clear the timer itself;
-                // reset is a no-op when no attempt is running.
+                // A fresh playthrough must clear whatever attempt is left in
+                // the timer: closing the game drops the IGT history that would
+                // otherwise reveal the new run. Reset is a no-op when idle.
                 actions.reset = is_fresh_run(&s);
-                // Whatever index the timer reports this tick describes the
-                // attempt we just reset or adopted, so it says nothing about
-                // this run. Align on the next tick.
+                // This tick's index still describes the old attempt.
                 return actions;
             }
 
-            // Attached to a run already underway (the splitter restarted, the
-            // attempt did not). Adopt it rather than sitting inert for the rest
-            // of the run: the timer is on game time, so the clock is already
-            // right and only the split index needs catching up. Requiring the
-            // timer to be no further along than the game keeps this from
-            // adopting a stale attempt left over from a previous run.
-            let underway = timer_split_index
-                .is_some_and(|index| index <= target_split_index(&s));
+            // No start edge to see, so the splitter restarted mid-run and the
+            // attempt did not. Adopt it, unless the timer sits ahead of the
+            // game, which means the attempt belongs to an earlier run.
+            let underway =
+                timer_split_index.is_some_and(|index| index <= target_split_index(&s));
             if !underway || is_fresh_run(&s) {
                 return actions;
             }
@@ -137,8 +106,7 @@ impl Splitter {
             return actions;
         };
 
-        // Only ever move forwards. A lower target means backtracking, or a
-        // manual split ahead of the game; neither is ours to undo.
+        // Forwards only: a lower target is backtracking or a manual split.
         let target = target_split_index(&s);
         if target > current {
             actions.skips = target - current - 1;
@@ -149,19 +117,15 @@ impl Splitter {
     }
 }
 
-/// The split index the timer should be on, given what the game reports.
-///
-/// Reaching checkpoint N ends segment N-1, so "index == highest checkpoint
-/// reached" holds for the whole run, and the end of the game ends the last
-/// segment, leaving the index at the segment count.
+/// The split index the timer should be on. Reaching checkpoint N ends segment
+/// N-1, and the end of the game ends the last segment.
 fn target_split_index(s: &Snapshot) -> u32 {
     let max = s.max_progress_level.max(0);
     let level = if s.game_ended {
         max
     } else {
-        // GTWProgressProvider.Events_OnGameEnd sets the level to
-        // GetMaxGameProgressLevel(), a sentinel one past the last real
-        // checkpoint. Clamp it: only `game_ended` may reach the final segment.
+        // Events_OnGameEnd parks the level on the max-progress sentinel; only
+        // `game_ended` may reach the final segment.
         s.progress_level.min(max - 1)
     };
     level.max(0) as u32
@@ -189,8 +153,7 @@ mod tests {
 
     const NOTHING: Actions = Actions { reset: false, start: false, skips: 0, split: false };
 
-    /// A splitter wired to a timer that reacts the way LiveSplit does, so the
-    /// index the splitter reads back is the one its own actions produced.
+    /// A splitter wired to a timer that reacts the way LiveSplit does.
     struct Sim {
         splitter: Splitter,
         index: Option<u32>,
@@ -206,8 +169,7 @@ mod tests {
             if actions.reset {
                 self.index = None;
             }
-            // The runtime ignores start unless the timer is idle, so a
-            // running attempt keeps its index.
+            // The runtime ignores start unless the timer is idle.
             if actions.start && self.index.is_none() {
                 self.index = Some(0);
             }
@@ -217,13 +179,12 @@ mod tests {
             actions
         }
 
-        /// The game process closing: splitter state dies with it, the timer's
-        /// does not.
+        /// The game process closing: splitter state dies, timer state does not.
         fn restart_splitter(&mut self) {
             self.splitter = Splitter::new();
         }
 
-        /// Drives a run from the menu to `progress_level`, the ordinary way.
+        /// Runs from the menu to `progress_level`, checkpoint by checkpoint.
         fn run_to(&mut self, progress_level: i32) -> Snapshot {
             self.tick(menu());
             let mut cur = menu();
@@ -267,8 +228,7 @@ mod tests {
         assert_eq!(sim.tick(go), NOTHING);
     }
 
-    /// The active checkpoint snaps to index 0 before first input, so that
-    /// transition must not split. See spec, Splits section.
+    /// The active checkpoint snaps to index 0 before first input.
     #[test]
     fn progress_before_start_does_not_split() {
         let mut sim = Sim::new();
@@ -330,8 +290,7 @@ mod tests {
     }
 
     /// An out-of-bounds route can reach a checkpoint without triggering the one
-    /// before it. The high-water mark then jumps by two, and both segments have
-    /// to end: the untriggered one skipped, the one that really ended split.
+    /// before it, so two segments end at once: one skipped, one split.
     #[test]
     fn skipped_checkpoint_advances_two_segments() {
         let mut sim = Sim::new();
@@ -351,8 +310,7 @@ mod tests {
         assert_eq!(sim.index, Some(7));
     }
 
-    /// Same mechanism, covering the reattach case: a readiness gap can hide
-    /// several checkpoints at once.
+    /// Same mechanism for a readiness gap, which can hide several checkpoints.
     #[test]
     fn catches_up_after_missing_several_checkpoints() {
         let mut sim = Sim::new();
@@ -365,9 +323,8 @@ mod tests {
         assert_eq!(sim.index, Some(8));
     }
 
-    /// GTWProgressProvider.Events_OnGameEnd sets the index to
-    /// GetMaxGameProgressLevel(), a sentinel past the last real checkpoint.
-    /// That jump must not produce an extra split.
+    /// Events_OnGameEnd parks the index on the max-progress sentinel, which is
+    /// not a checkpoint and must not split.
     #[test]
     fn max_progress_sentinel_does_not_split() {
         let mut sim = Sim::new();
@@ -433,9 +390,8 @@ mod tests {
         assert!(sim.tick(go).start, "the next run must be able to start");
     }
 
-    /// Closing the game mid-run and starting a fresh one: the splitter loses
-    /// every reading it had, so no IGT comparison can notice the new run. The
-    /// first input has to clear the attempt the dead run left behind.
+    /// Closing the game mid-run leaves no IGT history to reveal the next run,
+    /// so its first input must clear the dead run's attempt.
     #[test]
     fn fresh_run_after_process_restart_resets_the_stale_attempt() {
         let mut sim = Sim::new();
@@ -460,9 +416,8 @@ mod tests {
         assert_eq!(sim.index, Some(1));
     }
 
-    /// Same restart, but the run is resumed from a save rather than restarted.
-    /// Its IGT carries over, so the attempt is still the right one and must
-    /// survive.
+    /// Same restart, but resuming a save: its IGT carries over, so the attempt
+    /// is still the right one.
     #[test]
     fn resumed_run_after_process_restart_keeps_the_attempt() {
         let mut sim = Sim::new();
@@ -489,9 +444,8 @@ mod tests {
         assert_eq!(sim.index, Some(5));
     }
 
-    /// Attaching to a run already in progress, with no start edge to see: the
-    /// attempt is adopted and the index caught up, rather than the splitter
-    /// sitting inert for the rest of the run.
+    /// Attaching to a run in progress with no start edge to see: adopt the
+    /// attempt and catch the index up.
     #[test]
     fn adopts_a_run_already_underway() {
         let mut sim = Sim::new();
@@ -514,9 +468,8 @@ mod tests {
         assert!(sim.splitter.started());
     }
 
-    /// The same adoption must not happen against an attempt that cannot belong
-    /// to this run: a fresh playthrough with a stale attempt sitting well ahead
-    /// of it waits for the start edge, which resets.
+    /// Adoption must not take an attempt that sits ahead of a fresh run; that
+    /// waits for the start edge, which resets.
     #[test]
     fn does_not_adopt_a_stale_attempt_for_a_fresh_run() {
         let mut sim = Sim::new();
@@ -534,8 +487,7 @@ mod tests {
         assert!(sim.tick(cur).reset, "the start edge clears it");
     }
 
-    /// Loading flags are read for diagnostics only and must not gate splits,
-    /// because the game's IGT is already load-removed.
+    /// The game's IGT is already load-removed, so loading must not gate splits.
     #[test]
     fn loading_flag_does_not_suppress_splits() {
         let mut sim = Sim::new();

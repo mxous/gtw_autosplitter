@@ -2,9 +2,7 @@
 
 extern crate alloc;
 
-// asr's "alloc" feature requires the consumer to supply a global allocator;
-// the crate itself is no_std and ships none. This mirrors
-// LiveSplit/auto-splitter-template's own boilerplate.
+// asr's "alloc" feature requires the consumer to supply a global allocator.
 #[global_allocator]
 static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 
@@ -20,25 +18,12 @@ use gtw_logic::{Snapshot, Splitter};
 asr::async_main!(stable);
 asr::panic_handler!();
 
-/// Candidate process names. Under Proton the game presents as its Windows
-/// executable name; the bare name is a fallback.
+/// Candidate process names; the bare name is a fallback.
 const PROCESS_NAMES: &[&str] = &["Get To Work.exe", "Get To Work"];
 
-/// Reference path from a static field to the live `GTWProgressProvider`.
-///
-/// `GTWProgressProvider` is a scene `MonoBehaviour` with no static accessor of
-/// its own, and it lives in the additively-loaded `PlayerEssentials` scene
-/// rather than the active one, so asr's `SceneManager` root lookup cannot see
-/// it either. A reachability scan of every static field in Assembly-CSharp,
-/// Isto.Core, Plugins and Zenject (run mid-run on 2026-08-08) found exactly one
-/// path, this one. `PlayerController.CurrentPlayer` and
-/// `_playerWearableController` are both assigned in `PlayerController.Awake`;
-/// `GTWGameStats._gameProgress` is assigned by Zenject.
-///
-/// `_gameProgress` is declared as `IGameProgressProvider`, which has no fields.
-/// That is fine: `UnityPointer` resolves each hop's class from the object's own
-/// vtable at runtime, so the final hop resolves against the concrete
-/// `GTWProgressProvider`.
+/// The only reference path from a static field to the live
+/// `GTWProgressProvider`, which has no static accessor and is unreachable
+/// through `SceneManager`. Rooted at `PlayerController.CurrentPlayer`.
 const TO_PROVIDER: [&str; 4] = [
     "<CurrentPlayer>k__BackingField",
     "_playerWearableController",
@@ -46,26 +31,9 @@ const TO_PROVIDER: [&str; 4] = [
     "_gameProgress",
 ];
 
-/// Field offsets inside a Mono `Dictionary<TKey, TValue>` on 64-bit.
-///
-/// These cannot be resolved from metadata the way ordinary fields are: field
-/// offsets of a generic *definition* are not the offsets of an instantiation,
-/// and asr does not expose a way to build a `Class` from a live object's
-/// vtable. They were instead **measured** by dumping live dictionaries out of
-/// the running game on 2026-08-08:
-///
-/// ```text
-/// 0x00 vtable    0x08 sync block
-/// 0x10 buckets   0x18 entries   0x20..0x38 comparer/keys/values
-/// 0x40 count     0x44 freeList  0x48 freeCount   0x4C version
-/// ```
-///
-/// Note that `count` does NOT follow `entries`: Mono's auto layout emits every
-/// reference field before the value-type ones, so declaration order is not
-/// memory order. Assuming otherwise (count @0x20) is what made the splitter
-/// read 0 for `FilteredLevels.Count` and never arm itself. Both live
-/// instantiations, `<int, float>` and `<int, LevelCheckpointData>`, agreed on
-/// these offsets.
+/// Offsets in a 64-bit Mono `Dictionary`, measured from live ones because a
+/// generic definition carries no instantiation offsets. `count` does not follow
+/// `entries`: Mono's auto layout emits references first. See CLAUDE.md.
 const DICT_ENTRIES: u64 = 0x18;
 const DICT_COUNT: u64 = 0x40;
 
@@ -74,24 +42,15 @@ const ARRAY_LEN: u64 = 0x18;
 const ARRAY_DATA: u64 = 0x20;
 
 /// `Dictionary<int, float>.Entry` is `{ int hashCode; int next; int key; float
-/// value }`, 16 bytes. Confirmed against a live `GameTime`, whose first entry
-/// read `hash=0x7FFFFFFF next=-1 key=-1 value=0.0` — the game's `GameTime[-1]`.
-///
-/// The stride is per-instantiation (the `<int, LevelCheckpointData>` dictionary
-/// uses 24-byte entries), so this constant is only valid for `GameTime`.
+/// value }`. The stride is per-instantiation, so this is `GameTime` only.
 const ENTRY_SIZE: u64 = 16;
 const ENTRY_VALUE: u64 = 12;
 
-/// When true, the splitter logs its reading of the provider once a second, and
-/// reports how far the pointer path got whenever a read fails.
-///
-/// The hardcoded dictionary offsets above are the only part of this splitter
-/// that metadata cannot verify, so turn this back on whenever they are touched
-/// or the game updates: the OBS log is the only debugger available here.
+/// Logs the provider reading once a second, and how far the pointer path got
+/// when a read fails. Turn on whenever the offsets above or the game change.
 const LOG_READINGS: bool = false;
 
-/// Anything read out of `GTWProgressProvider` for a single tick, before it is
-/// judged good enough to hand to the state machine.
+/// One tick's reading of `GTWProgressProvider`, before it is judged ready.
 struct RawState {
     init: bool,
     has_checkpoint_data: bool,
@@ -127,9 +86,9 @@ impl Provider {
     }
 
     fn read(&self, process: &Process, module: &Module, image: &Image) -> Option<RawState> {
-        // GetMaxGameProgressLevel() returns FilteredLevels.Count. The property
-        // rebuilds the cache when it is null, which an external reader cannot
-        // do, so a null cache is reported as -1 and gates the whole snapshot.
+        // GetMaxGameProgressLevel() is FilteredLevels.Count. An external reader
+        // cannot rebuild the cache, so a null one is reported as -1 and gates
+        // the snapshot.
         let max_progress_level =
             match read_pointer(process, module, image, &self.filtered_levels) {
                 Some(dict) => process.read::<i32>(dict + DICT_COUNT).ok()?,
@@ -157,10 +116,8 @@ impl Provider {
     }
 }
 
-/// Reports how far along [`TO_PROVIDER`] the pointer path actually gets.
-///
-/// Without this, a failure to resolve the path and a provider that is merely
-/// not ready yet are indistinguishable: both simply produce no output.
+/// Reports how far along [`TO_PROVIDER`] the pointer path gets, which is the
+/// only way to tell a broken path from a provider that is not ready yet.
 struct Hops([UnityPointer<5>; 4]);
 
 impl Hops {
@@ -227,12 +184,9 @@ fn read_pointer(
     }
 }
 
-/// Sums the values of a `Dictionary<int, float>`, which is what
-/// `GetTotalGameSecondsElapsedInPlaythrough()` does: the game accumulates
-/// `Time.deltaTime` into a per-checkpoint bucket, and total IGT is their sum.
-///
-/// Entries are never removed from `GameTime`, so every slot below `count` is
-/// live and the free list can be ignored.
+/// Sums a `Dictionary<int, float>`, which is what
+/// `GetTotalGameSecondsElapsedInPlaythrough()` does. `GameTime` never removes
+/// entries, so every slot below `count` is live and the free list is ignored.
 fn sum_dictionary(process: &Process, module: &Module, dict: Address) -> Option<f32> {
     let count = process.read::<i32>(dict + DICT_COUNT).ok()?;
     if count <= 0 {
@@ -246,8 +200,7 @@ fn sum_dictionary(process: &Process, module: &Module, dict: Address) -> Option<f
         return Some(0.0);
     }
 
-    // The array's own length bounds the walk, so a wrong `count` cannot make
-    // this read past the end of the allocation.
+    // The array's length bounds the walk against a wrong `count`.
     let length = process.read::<i32>(entries + ARRAY_LEN).ok()?;
     let live = count.min(length);
 
@@ -276,7 +229,7 @@ async fn main() {
     }
 }
 
-/// `Process::wait_attach` takes a single name, so poll the candidates in turn.
+/// `Process::wait_attach` takes one name, so poll the candidates in turn.
 async fn wait_attach_any(names: &[&str]) -> Process {
     retry(|| names.iter().find_map(|name| Process::attach(name))).await
 }
@@ -301,9 +254,8 @@ async fn on_attach(process: &Process) {
         // Every read hangs off PlayerController.CurrentPlayer, which is null
         // outside a run, so failure here is the normal menu state.
         if let Some(raw) = provider.read(process, &module, &image) {
-            // Mirrors the old bridge mod's `Attached` flag: until the provider
-            // has found its CheckpointManager and built the filtered-level
-            // cache, its fields are not yet meaningful.
+            // Until the provider has found its CheckpointManager and built the
+            // filtered-level cache, its fields are not meaningful.
             let attached = raw.init && raw.has_checkpoint_data && raw.max_progress_level > 0;
 
             if attached != was_attached {
@@ -338,22 +290,18 @@ async fn on_attach(process: &Process) {
 
                 let snapshot = Snapshot {
                     // GetCurrentGameProgressLevel() is `_bestCheckpointIndex`
-                    // guarded by the same conditions as `attached` above, so
-                    // the raw index is the right value to use here.
+                    // under the same guards as `attached` above.
                     progress_level: raw.best_checkpoint_index,
                     max_progress_level: raw.max_progress_level,
                     game_paused: raw.game_paused,
                     game_ended: raw.game_ended,
                     total_igt: raw.total_igt,
                     // The game's IGT is already load-removed, so this is
-                    // diagnostic only. Ruling of 2026-07-29 by the repo owner.
+                    // diagnostic only and must not gate splits.
                     currently_loading: false,
                 };
 
-                // The timer's own split index is an input to the decision:
-                // it is what tells the splitter how far behind the run the
-                // timer is, whether because a checkpoint was skipped out of
-                // bounds or because the splitter restarted with the game.
+                // Tells the splitter how far behind the run the timer is.
                 let split_index =
                     timer::current_split_index().and_then(|index| u32::try_from(index).ok());
 
@@ -369,16 +317,14 @@ async fn on_attach(process: &Process) {
                     timer::pause_game_time();
                 }
 
-                // Before any split, so that each segment is recorded at the
-                // IGT of the checkpoint that ended it.
+                // Before any split, so each segment records the IGT of the
+                // checkpoint that ended it.
                 if matches!(timer::state(), TimerState::Running | TimerState::Paused) {
                     timer::set_game_time(Duration::seconds_f64(raw.total_igt as f64));
                 }
 
-                // Segments whose checkpoint the run never triggered are
-                // skipped rather than split, so they record no bogus
-                // zero-length time and the elapsed span lands on the segment
-                // that actually ended.
+                // Segments whose checkpoint the run never triggered are skipped,
+                // so the elapsed span lands on the segment that did end.
                 for _ in 0..actions.skips {
                     asr::print_message("skip split");
                     timer::skip_split();
