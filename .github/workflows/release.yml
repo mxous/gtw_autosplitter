@@ -1,0 +1,61 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup honours rust-toolchain.toml, but only installs the targets it
+      # lists when it installs the toolchain itself; the runner already has one.
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Test
+        run: cargo test -p gtw-logic --locked
+
+      - name: Build
+        run: cargo build -p gtw-autosplitter --release --target wasm32-unknown-unknown --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gtw_autosplitter.wasm
+          path: target/wasm32-unknown-unknown/release/gtw_autosplitter.wasm
+          if-no-files-found: error
+
+      # Releases are cut from the workspace version, so merging to main only
+      # publishes when that version has been bumped. Everything else just gets
+      # the build and test above.
+      - name: Release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name=="gtw-autosplitter") | .version')"
+          tag="v${version}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; bump the version in Cargo.toml to cut a new one."
+            exit 0
+          fi
+
+          gh release create "$tag" \
+            --title "$tag" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            target/wasm32-unknown-unknown/release/gtw_autosplitter.wasm

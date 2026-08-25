@@ -61,3 +61,7 @@ toolchain is all you need.
 The split logic lives in `crates/gtw-logic`, a `no_std`, dependency-free state machine that can
 be tested without the game, a process, or wasm. `crates/gtw-autosplitter` does the process and
 Mono attaching and nothing else.
+
+Releases are cut by CI from the workspace version: every push to `main` builds and tests, and
+publishes `v<version>` with the `.wasm` attached if that tag does not exist yet. To cut one,
+bump `version` in the root `Cargo.toml` and merge.
